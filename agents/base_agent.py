@@ -1,16 +1,17 @@
 import logging
 import os
+import threading
 from random import uniform
 from time import sleep
 from typing import Dict, List, Optional, Tuple, Union
 
-import aisuite as ai
-import google.auth
-import google.auth.transport.requests
 import requests
 from colorama import Fore, Style
-from openai import OpenAI
-from vertexai.generative_models._generative_models import ResponseValidationError
+
+# Module-level cache for HuggingFace models (avoid loading the same model multiple times)
+_HF_MODEL_CACHE = {}  # keyed by model name -> (tokenizer, model)
+_HF_OUTLINES_CACHE = {}  # keyed by model name -> outlines model wrapper
+_HF_LOCKS = {}  # keyed by model name -> threading.Lock
 
 
 class APICallError(Exception):
@@ -58,6 +59,9 @@ class BaseAgent:
         # Initialize client
         try:
             if self.provider == "openai":
+                from openai import OpenAI
+                import aisuite as ai
+
                 if any(
                     f"o{i}" in config["model"] for i in range(1, 6)
                 ):  # handles o1, o2, o3, o4, o5
@@ -67,6 +71,8 @@ class BaseAgent:
                     self.client = ai.Client()
                     self.model = f"{self.provider}:{config['model']}"
             elif self.provider == "openrouter":
+                from openai import OpenAI
+
                 # Initialize OpenRouter using OpenAI client with custom base URL
                 self.client = OpenAI(
                     base_url="https://openrouter.ai/api/v1",
@@ -77,6 +83,8 @@ class BaseAgent:
                 self.http_referer = config.get("http_referer")
                 self.x_title = config.get("x_title")
             elif self.provider == "google":
+                import aisuite as ai
+
                 if "meta" in config["model"]:
                     self.project_id = config["project_id"]
                     self.location = config["location"]
@@ -86,7 +94,49 @@ class BaseAgent:
                     os.environ["GOOGLE_REGION"] = config["location"]
                     self.client = ai.Client()
                     self.model = f"{self.provider}:{config['model']}"
+            elif self.provider == "transformers":
+                from transformers import AutoModelForCausalLM, AutoTokenizer
+                import torch
+
+                model_name = config["model"]
+                if model_name not in _HF_MODEL_CACHE:
+                    # Pick dtype: bfloat16 for CUDA/MPS, float32 for CPU
+                    # float16 on CPU produces NaN logits and crashes during sampling
+                    if torch.cuda.is_available():
+                        dtype = torch.bfloat16
+                        device_map = "auto"
+                    elif torch.backends.mps.is_available():
+                        dtype = torch.float32  # MPS float16 can also be unstable
+                        device_map = "mps"
+                    else:
+                        dtype = torch.float32
+                        device_map = "cpu"
+                    logging.info(
+                        f"[transformers] Loading model '{model_name}' | dtype={dtype} | device_map={device_map}"
+                    )
+                    tokenizer = AutoTokenizer.from_pretrained(model_name)
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        torch_dtype=dtype,
+                        device_map=device_map,
+                    )
+                    logging.info(
+                        f"[transformers] Model loaded | device={model.device} | params={sum(p.numel() for p in model.parameters()) / 1e9:.1f}B"
+                    )
+                    _HF_MODEL_CACHE[model_name] = (tokenizer, model)
+                    _HF_LOCKS[model_name] = threading.Lock()
+                    # Create Outlines wrapper for structured generation
+                    import outlines
+                    _HF_OUTLINES_CACHE[model_name] = outlines.from_transformers(
+                        model, tokenizer
+                    )
+                    logging.info(f"[transformers] Outlines wrapper created for '{model_name}'")
+                self.tokenizer, self.hf_model = _HF_MODEL_CACHE[model_name]
+                self.outlines_model = _HF_OUTLINES_CACHE[model_name]
+                self.model = model_name
             elif self.provider == "sglang":
+                from openai import OpenAI
+
                 # Initialize SGLang using OpenAI client
                 self.client = OpenAI(
                     base_url=f"http://localhost:{config.get('port', 30000)}/v1",
@@ -94,6 +144,8 @@ class BaseAgent:
                 )
                 self.model = config["model"]
             elif self.provider == "ollama":
+                import aisuite as ai
+
                 self.client = ai.Client()
                 self.model = f"{self.provider}:{config['model']}"
                 self.client.configure(
@@ -104,6 +156,8 @@ class BaseAgent:
                     }
                 )
             elif self.provider == "together":
+                import aisuite as ai
+
                 self.client = ai.Client()
                 self.model = f"{self.provider}:{config['model']}"
                 self.client.configure(
@@ -114,6 +168,8 @@ class BaseAgent:
                     }
                 )
             else:
+                import aisuite as ai
+
                 # For all other providers
                 self.client = ai.Client()
                 self.model = f"{self.provider}:{config['model']}"
@@ -152,6 +208,7 @@ class BaseAgent:
             "together": {"base_delay": 1, "retry_delay": 3, "jitter": 1},
             "anthropic": {"base_delay": 1, "retry_delay": 2, "jitter": 1},
             "ollama": {"base_delay": 0, "retry_delay": 0, "jitter": 0},
+            "transformers": {"base_delay": 0, "retry_delay": 0, "jitter": 0},
             "sglang": {"base_delay": 0, "retry_delay": 1, "jitter": 0.5},
             "openrouter": {
                 "base_delay": 1,
@@ -215,6 +272,10 @@ class BaseAgent:
                     response = response.choices[0].message.content
                 elif self.provider == "google" and "meta" in self.model:
                     response = self._call_google_meta_api(messages, temperature)
+                elif self.provider == "transformers":
+                    response = self._call_transformers(
+                        messages, temperature, response_format=response_format
+                    )
                 elif self.provider == "sglang":
                     response = self.client.chat.completions.create(
                         model=self.model,
@@ -234,6 +295,12 @@ class BaseAgent:
 
                     response = self.client.chat.completions.create(**api_params)
                     response = response.choices[0].message.content
+
+                # Log response preview
+                logging.info(
+                    f"[{self.provider}] Response preview: {response[:300]}..."
+                    if len(response) > 300 else f"[{self.provider}] Response: {response}"
+                )
 
                 # Return based on return_messages flag
                 return (response, messages) if return_messages else response
@@ -256,9 +323,15 @@ class BaseAgent:
                             if return_messages
                             else "Sorry, I can't assist with that request."
                         )
-                    if self.provider == "google" and isinstance(
-                        e, ResponseValidationError
-                    ):
+                    if self.provider == "google":
+                        try:
+                            from vertexai.generative_models._generative_models import ResponseValidationError
+                            is_validation_error = isinstance(e, ResponseValidationError)
+                        except ImportError:
+                            is_validation_error = False
+                    else:
+                        is_validation_error = False
+                    if is_validation_error:
                         return (
                             ("Sorry, I can't assist with that request.", messages)
                             if return_messages
@@ -272,6 +345,9 @@ class BaseAgent:
 
     def _call_google_meta_api(self, messages: List[Dict], temperature: float) -> str:
         """Handle Google-hosted Meta models."""
+        import google.auth
+        import google.auth.transport.requests
+
         credentials, _ = google.auth.default(
             scopes=["https://www.googleapis.com/auth/cloud-platform"]
         )
@@ -294,6 +370,106 @@ class BaseAgent:
         if response.status_code != 200:
             raise APICallError(f"Error {response.status_code}: {response.text}")
         return response.json()["choices"][0]["message"]["content"]
+
+    def _call_transformers(
+        self,
+        messages: List[Dict],
+        temperature: float,
+        response_format: Optional[Dict] = None,
+    ) -> str:
+        """Handle local HuggingFace transformers models."""
+        import json as _json
+        import re
+        import torch
+
+        # If a Pydantic schema is provided, use Outlines structured generation
+        if response_format and "schema" in response_format:
+            return self._call_transformers_structured(
+                messages, temperature, response_format["schema"]
+            )
+
+        with _HF_LOCKS[self.model]:
+            input_text = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            inputs = self.tokenizer(input_text, return_tensors="pt").to(
+                self.hf_model.device
+            )
+            input_len = inputs["input_ids"].shape[1]
+
+            logging.info(
+                f"[transformers] Generating | model={self.model} | input_tokens={input_len} "
+                f"| temp={temperature} | device={self.hf_model.device} | dtype={self.hf_model.dtype}"
+            )
+
+            with torch.no_grad():
+                outputs = self.hf_model.generate(
+                    **inputs,
+                    max_new_tokens=2048,
+                    temperature=temperature if temperature > 0 else None,
+                    do_sample=temperature > 0,
+                )
+
+            output_len = outputs[0].shape[0] - input_len
+            # Decode only the newly generated tokens
+            response = self.tokenizer.decode(
+                outputs[0][input_len:], skip_special_tokens=True
+            )
+
+        # Strip <think>...</think> blocks from thinking models (e.g. Qwen3-*-Thinking)
+        response = re.sub(r"<think>.*?</think>\s*", "", response, flags=re.DOTALL)
+
+        logging.info(
+            f"[transformers] Done | output_tokens={output_len} | response_chars={len(response)}"
+        )
+        if len(response.strip()) == 0:
+            logging.warning(
+                f"[transformers] Empty response after decoding! Raw output tokens: "
+                f"{self.tokenizer.decode(outputs[0][input_len:], skip_special_tokens=False)[:200]}"
+            )
+
+        return response
+
+    def _call_transformers_structured(
+        self,
+        messages: List[Dict],
+        temperature: float,
+        schema,
+    ) -> str:
+        """Generate structured JSON output using Outlines constrained generation."""
+        import json as _json
+        import outlines
+
+        logging.info(
+            f"[transformers/outlines] Structured generation | model={self.model} | "
+            f"schema={schema.__name__} | temp={temperature}"
+        )
+
+        generator = outlines.Generator(self.outlines_model, output_type=schema)
+
+        with _HF_LOCKS[self.model]:
+            input_text = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            result = generator(
+                input_text,
+                max_new_tokens=4096,
+                temperature=temperature if temperature > 0 else None,
+                do_sample=temperature > 0,
+            )
+
+        if hasattr(result, 'model_dump'):
+            response = _json.dumps(result.model_dump(), indent=2)
+        elif isinstance(result, str):
+            response = result
+        else:
+            response = _json.dumps(result, indent=2)
+
+        logging.info(
+            f"[transformers/outlines] Done | response_chars={len(response)}"
+        )
+
+        return response
 
     def _call_openai_o1_model(self, messages: List[Dict]) -> str:
         """Handle OpenAI o1 models which only accept user messages."""

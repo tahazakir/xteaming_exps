@@ -289,10 +289,21 @@ class TGAttackerAgent(AttackerAgent):
     """Variant of AttackerAgent which can perform Textual Gradient Descent."""
 
     def __init__(
-        self, attacker_config: Dict, target_config: Dict, behavior: Dict, strategy: Dict
+        self,
+        attacker_config: Dict,
+        target_config: Dict,
+        behavior: Dict,
+        strategy: Dict,
+        eval_config: Dict = None,
     ):
         super().__init__(attacker_config, behavior, strategy)
-        self.judge = GPTJudge()
+        if eval_config is None:
+            eval_config = {
+                "provider": attacker_config["provider"],
+                "model": attacker_config["model"],
+                "max_retries": attacker_config.get("max_retries", 3),
+            }
+        self.judge = GPTJudge(config=eval_config)
         self.last_phase = 0
         self.target_agent = TGTargetModel(target_config)
 

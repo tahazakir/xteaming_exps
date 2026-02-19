@@ -1,48 +1,52 @@
 # config/config.yaml
 
 attacker:
-  provider: "sglang"
-  model: "Qwen/Qwen2.5-32B-Instruct"
-  port: 30009
+  provider: "transformers"
+  model: "Qwen/Qwen3-1.7B"  # Use 32B+ on cluster
   temperature: 0.3
-  max_retries: 10
-  max_turns: 7
+  max_retries: 1
+  max_turns: 3                  # Minimal for quick testing (increase for real runs)
   plans_file: './strategies/attack_plans.json'
-  plan_revision: true           # whether to extend unsuccessful plans that ran out of phases
+  plan_revision: false          # Disable for quick testing
   run_all_strategies: false     # only require one successful strategy per behavior
-  strategies_per_behavior: 10   # set to 50 for completeness
+  strategies_per_behavior: 1    # Minimal for quick testing (set to 10+ for real runs)
+  sets_per_behavior: 1          # Must match num_sets in attack_plan_generator
+  strategies_per_set: 2         # Must match num_strategies_per_set in attack_plan_generator
 
 target:
-  provider: "openai"
-  model: "gpt-4o"
+  provider: "transformers"
+  model: "Qwen/Qwen3-1.7B"  # Use 32B+ on cluster
   temperature: 0
-  max_retries: 10
+  max_retries: 1
 
 textgrad:
   enabled: true
-  provider: "sglang"
-  model: "Qwen/Qwen2.5-32B-Instruct"
-  port: 30009
+  provider: "transformers"
+  model: "Qwen/Qwen3-1.7B"  # Use 32B+ on cluster
   temperature: 0
-  max_retries: 10
-  max_turns_per_phase: 4  # retry optimization up to this many times until score increases;
-                          # otherwise move onto next plan phase
+  max_retries: 1
+  max_turns_per_phase: 4
 
 attack_validation:
-  max_tokens_for_evaluation: 512  # Maximum tokens to consider when checking for jailbreak
+  max_tokens_for_evaluation: 512
 
 multithreading:
-  max_workers: 20         # reduce if experiencing API rate limits
+  max_workers: 1  # Set to 1-2 for local transformers (sequential generation)
 
 attack_plan_generator:
-  provider: "openai"
-  model: "gpt-4o"
+  provider: "transformers"
+  model: "Qwen/Qwen3-1.7B"  # Use 32B+ on cluster
   temperature: 0.5
-  max_retries: 3
-  behavior_path: "./behaviors/harmbench_behaviors_text_test.csv"  # see readme for download
+  max_retries: 1
+  behavior_path: "./behaviors/harmbench_behaviors_text_test.csv"
   attack_plan_generation_dir: "./strategies"
-  num_behaviors: 159
+  num_behaviors: 2
+  num_strategies_per_set: 2   # Minimal for testing (set to 10 for real runs)
+  num_sets: 1                 # Minimal for testing (set to 5 for real runs)
 
 evaluation:
-  use_gpt_judge: true  # Set to true to use GPT evaluator
-  judge_model: "gpt-4o"  # Only needed if use_gpt_judge is true
+  use_gpt_judge: true
+  provider: "transformers"
+  model: "Qwen/Qwen3-1.7B"  # Use 32B+ on cluster
+  temperature: 0
+  max_retries: 1

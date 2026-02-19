@@ -3,16 +3,32 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
 from datetime import datetime
-from pprint import pprint
+from typing import Dict
 
 import numpy as np
 import pandas as pd
 import tqdm
 import yaml
+from pydantic import BaseModel, create_model
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 from agents.base_agent import BaseAgent
+
+
+class Strategy(BaseModel):
+    persona: str
+    context: str
+    approach: str
+    turns_needed: str
+    conversation_plan: Dict[str, str]
+
+
+def make_strategy_set_schema(n: int):
+    """Dynamically create a Pydantic model with n strategy fields."""
+    fields = {f"strategy_{i}": (Strategy, ...) for i in range(1, n + 1)}
+    return create_model("StrategySet", **fields)
 
 
 def setup_logging(output_dir):
@@ -44,7 +60,7 @@ def load_datasets(csv_path, number_of_behaviors=15):
     return filtered_df.sample(n=number_of_behaviors)
 
 
-def load_and_format_prompts(behavior, set_number, previous_responses=None):
+def load_and_format_prompts(behavior, set_number, num_strategies=10, previous_responses=None):
     """Load and format prompts based on set number"""
     with open("config/prompts/plan_generation_prompts.yaml", "r") as f:
         prompts = yaml.safe_load(f)
@@ -65,6 +81,13 @@ def load_and_format_prompts(behavior, set_number, previous_responses=None):
             "{previously_generated_strategies}", strategies_text
         )
 
+    # Replace "10" with the configured number of strategies in the prompt
+    if num_strategies != 10:
+        formatted_user_prompt = re.sub(
+            r"Generate 10 distinct", f"Generate {num_strategies} distinct",
+            formatted_user_prompt
+        )
+
     return system_prompt, formatted_user_prompt
 
 
@@ -76,26 +99,28 @@ def create_output_directory(base_output_dir):
     return output_dir
 
 
-@retry(stop=stop_after_attempt(5), wait=wait_fixed(1))
-def generate_strategies(agent, messages, set_num, temperature):
+@retry(stop=stop_after_attempt(2), wait=wait_fixed(1))
+def generate_strategies(agent, messages, set_num, temperature, schema, num_strategies):
     """Generate strategies for a single set"""
     response = agent.call_api(
         messages=messages,
         temperature=temperature,
-        response_format={"type": "json_object"},
+        response_format={"type": "json_object", "schema": schema},
     )
 
     # Parse the response string into a Python dictionary
     parsed_response = json.loads(response)
-    assert len(parsed_response) == 10
+    assert len(parsed_response) == num_strategies, (
+        f"Expected {num_strategies} strategies, got {len(parsed_response)}"
+    )
 
     logging.info(f"\nSet {set_num} Generated Strategies:")
-    logging.info(response)  # Keep original logging
+    logging.info(response)
 
-    return parsed_response  # Return parsed dictionary instead of raw string
+    return parsed_response
 
 
-def process_single_behavior(i, row, agent, temperature, num_sets=5):
+def process_single_behavior(i, row, agent, temperature, num_sets=5, num_strategies=10, schema=None):
     behavior = row["Behavior"]
     behavior_id = row["BehaviorID"]
     logging.info(f"\n{'='*50}")
@@ -121,7 +146,8 @@ def process_single_behavior(i, row, agent, temperature, num_sets=5):
         logging.info(f"\nGenerating Set {set_num}:")
 
         system_prompt, formatted_user_prompt = load_and_format_prompts(
-            behavior=behavior, set_number=set_num, previous_responses=all_responses
+            behavior=behavior, set_number=set_num,
+            num_strategies=num_strategies, previous_responses=all_responses
         )
 
         messages = [
@@ -130,7 +156,7 @@ def process_single_behavior(i, row, agent, temperature, num_sets=5):
         ]
 
         logging.info(f"Messages for set {set_num}")
-        logging.info(pprint(messages, indent=2))
+        logging.info(json.dumps(messages, indent=2, ensure_ascii=False)[:500])
 
         message_data = {
             "behavior_index": i,
@@ -145,6 +171,8 @@ def process_single_behavior(i, row, agent, temperature, num_sets=5):
             messages=messages,
             set_num=set_num,
             temperature=temperature,
+            schema=schema,
+            num_strategies=num_strategies,
         )
 
         all_responses[f"Set_{set_num}"] = response
@@ -168,15 +196,17 @@ def main():
         config = yaml.safe_load(f)
 
     # Setup
-    output_dir = create_output_directory(
-        config["attack_plan_generator"]["attack_plan_generation_dir"]
-    )
+    gen_config = config["attack_plan_generator"]
+    output_dir = create_output_directory(gen_config["attack_plan_generation_dir"])
     setup_logging(output_dir)
-    agent = BaseAgent(config["attack_plan_generator"])
-    df = load_datasets(
-        config["attack_plan_generator"]["behavior_path"],
-        config["attack_plan_generator"]["num_behaviors"],
-    )
+    agent = BaseAgent(gen_config)
+    df = load_datasets(gen_config["behavior_path"], gen_config["num_behaviors"])
+
+    num_strategies = gen_config.get("num_strategies_per_set", 10)
+    num_sets = gen_config.get("num_sets", 5)
+    schema = make_strategy_set_schema(num_strategies)
+
+    logging.info(f"Config: {num_strategies} strategies/set, {num_sets} sets/behavior, {gen_config['num_behaviors']} behaviors")
 
     all_behaviors_data = []
     all_messages = []
@@ -188,7 +218,10 @@ def main():
                 "i": i,
                 "row": row,
                 "agent": agent,
-                "temperature": config["attack_plan_generator"]["temperature"],
+                "temperature": gen_config["temperature"],
+                "num_sets": num_sets,
+                "num_strategies": num_strategies,
+                "schema": schema,
             }
         )
 

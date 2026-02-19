@@ -95,7 +95,9 @@ def run_single_strategy(
         attacker = AttackerAgent(attacker_config, behavior, strategy)
         target = TargetModel(target_config)
     else:
-        attacker = TGAttackerAgent(attacker_config, target_config, behavior, strategy)
+        attacker = TGAttackerAgent(
+            attacker_config, target_config, behavior, strategy, eval_config=eval_config
+        )
 
     strategy_result = {
         "set_number": set_num,
@@ -119,7 +121,7 @@ def run_single_strategy(
         # Generate attacker response
         if not textgrad_mode:
             if eval_config["use_gpt_judge"]:
-                evaluator = GPTJudge(model_name=eval_config["judge_model"])
+                evaluator = GPTJudge(config=eval_config)
             else:
                 raise NotImplementedError(
                     "Using a judge other than GPT is not currently supported."
