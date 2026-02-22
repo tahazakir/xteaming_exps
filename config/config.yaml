@@ -2,7 +2,8 @@
 
 attacker:
   provider: "transformers"
-  model: "Qwen/Qwen2.5-72B-Instruct-AWQ"
+  model: "Qwen/Qwen2.5-72B-Instruct"
+  quantization: "4bit"
   temperature: 0.3
   max_retries: 1
   max_turns: 3                  # Minimal for quick testing (increase for real runs)
@@ -22,7 +23,8 @@ target:
 textgrad:
   enabled: true
   provider: "transformers"
-  model: "Qwen/Qwen2.5-72B-Instruct-AWQ"
+  model: "Qwen/Qwen2.5-72B-Instruct"
+  quantization: "4bit"
   temperature: 0
   max_retries: 1
   max_turns_per_phase: 4
@@ -35,7 +37,8 @@ multithreading:
 
 attack_plan_generator:
   provider: "transformers"
-  model: "Qwen/Qwen2.5-72B-Instruct-AWQ"
+  model: "Qwen/Qwen2.5-72B-Instruct"
+  quantization: "4bit"
   temperature: 0.5
   max_retries: 1
   behavior_path: "./behaviors/harmbench_behaviors_text_test.csv"
@@ -47,6 +50,7 @@ attack_plan_generator:
 evaluation:
   use_gpt_judge: true
   provider: "transformers"
-  model: "Qwen/Qwen2.5-72B-Instruct-AWQ"
+  model: "Qwen/Qwen2.5-72B-Instruct"
+  quantization: "4bit"
   temperature: 0
   max_retries: 1

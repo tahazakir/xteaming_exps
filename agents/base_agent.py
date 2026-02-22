@@ -111,14 +111,36 @@ class BaseAgent:
                     else:
                         dtype = torch.float32
                         device_map = "cpu"
-                    logging.info(
-                        f"[transformers] Loading model '{model_name}' | dtype={dtype} | device_map={device_map}"
-                    )
+
+                    # Check for quantization config
+                    quantization = config.get("quantization", None)
+                    quantization_config = None
+                    if quantization == "4bit" and torch.cuda.is_available():
+                        from transformers import BitsAndBytesConfig
+                        quantization_config = BitsAndBytesConfig(
+                            load_in_4bit=True,
+                            bnb_4bit_compute_dtype=torch.bfloat16,
+                            bnb_4bit_quant_type="nf4",
+                        )
+                        logging.info(
+                            f"[transformers] Loading model '{model_name}' | 4-bit quantized (bitsandbytes) | device_map={device_map}"
+                        )
+                    else:
+                        logging.info(
+                            f"[transformers] Loading model '{model_name}' | dtype={dtype} | device_map={device_map}"
+                        )
+
                     tokenizer = AutoTokenizer.from_pretrained(model_name)
+                    load_kwargs = {
+                        "device_map": device_map,
+                    }
+                    if quantization_config:
+                        load_kwargs["quantization_config"] = quantization_config
+                    else:
+                        load_kwargs["torch_dtype"] = dtype
                     model = AutoModelForCausalLM.from_pretrained(
                         model_name,
-                        torch_dtype=dtype,
-                        device_map=device_map,
+                        **load_kwargs,
                     )
                     logging.info(
                         f"[transformers] Model loaded | device={model.device} | params={sum(p.numel() for p in model.parameters()) / 1e9:.1f}B"
