@@ -33,3 +33,6 @@ dependencies = [
     "tqdm>=4.67.3",
     "transformers>=5.2.0",
 ]
+
+[project.optional-dependencies]
+gpu = ["autoawq"]
