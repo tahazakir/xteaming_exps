@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import random
+import sys
+import traceback
 from datetime import datetime
 
 import textgrad as tg
@@ -44,7 +46,11 @@ def create_output_directory():
 
 
 def setup_logging(output_dir, debug=False):
-    """Setup logging to both file and console with ANSI code handling"""
+    """Setup logging to both file and console with ANSI code handling.
+
+    Also redirects stdout/stderr to the log file so that all output
+    (including print() calls and uncaught tracebacks) is captured.
+    """
 
     class NoColorFormatter(logging.Formatter):
         def format(self, record):
@@ -54,7 +60,8 @@ def setup_logging(output_dir, debug=False):
             return super().format(record)
 
     # Create file handler
-    file_handler = logging.FileHandler(os.path.join(output_dir, "execution_log.txt"))
+    log_path = os.path.join(output_dir, "execution_log.txt")
+    file_handler = logging.FileHandler(log_path)
     file_handler.setFormatter(
         NoColorFormatter("%(asctime)s - %(threadName)s - %(levelname)s - %(message)s")
     )
@@ -66,6 +73,45 @@ def setup_logging(output_dir, debug=False):
     # Setup basic config
     level = logging.DEBUG if debug else logging.INFO
     logging.basicConfig(level=level, handlers=[file_handler, console_handler])
+
+    # Redirect stdout and stderr to the log file as well, so that print()
+    # calls and unhandled tracebacks are captured.
+    class _TeeStream:
+        """Write to both the original stream and the log file."""
+
+        def __init__(self, original, log_file):
+            self._original = original
+            self._log_file = log_file
+
+        def write(self, msg):
+            self._original.write(msg)
+            try:
+                self._log_file.write(msg)
+                self._log_file.flush()
+            except Exception:
+                pass
+
+        def flush(self):
+            self._original.flush()
+            try:
+                self._log_file.flush()
+            except Exception:
+                pass
+
+        def __getattr__(self, name):
+            return getattr(self._original, name)
+
+    log_file_handle = open(log_path, "a")
+    sys.stdout = _TeeStream(sys.__stdout__, log_file_handle)
+    sys.stderr = _TeeStream(sys.__stderr__, log_file_handle)
+
+    # Install a global exception hook so uncaught exceptions are logged
+    def _exception_hook(exc_type, exc_value, exc_tb):
+        logging.error(
+            "Uncaught exception", exc_info=(exc_type, exc_value, exc_tb)
+        )
+
+    sys.excepthook = _exception_hook
 
 
 def run_single_strategy(
@@ -300,9 +346,9 @@ def main(debug, config_path):
             concurrent.futures.as_completed(futures), total=len(futures)
         ):
             param_dict = futures[future]
-            behavior_result = future.result()
             behavior_number = param_dict["plan"]["behavior_number"]
             try:
+                behavior_result = future.result()
                 results["behaviors"][behavior_number] = behavior_result
 
                 # Save results in the timestamped directory
@@ -311,7 +357,9 @@ def main(debug, config_path):
                     json.dump(results, f, indent=4)
             except Exception as e:
                 logging.error(
-                    f"Behavior {behavior_number} generated an exception", exc_info=e
+                    f"Behavior {behavior_number} generated an exception:\n"
+                    f"{traceback.format_exc()}",
+                    exc_info=e,
                 )
 
     logging.info("Finished")
